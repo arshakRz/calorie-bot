@@ -132,21 +132,41 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── OpenAI summariser ──────────────────────────────────────────────────────────
 def build_prompt(date_str: str, since_label: str) -> str:
     return (
-        f"You are a precise nutrition assistant. "
-        f"Below are all the messages and food photos two people shared about their meals {since_label} ({date_str}). "
-        f"Estimate the total calories and total protein (in grams) for each person separately. "
+        f"You are a helpful food journal assistant. "
+        f"Two people are tracking what they eat by sending text messages and photos of their meals. "
+        f"For each photo, first identify what food or drink you can see in it, then use that to estimate the nutritional content. "
+        f"For each person, add up all their meals (from both text and photos) and provide a total calorie and protein estimate. "
+        f"Use realistic average portion sizes when exact amounts are not specified. "
+        f"This is for personal health tracking so always provide your best estimate even if approximate. "
         f"Reply exclusively in English. "
-        f"Format the summary exactly like this:\n\n"
-        f"📊 Calorie Summary – {date_str}\n\n"
-        f"👤 {{Name1}}\n"
-        f"• Calories: ~{{X}} kcal\n"
-        f"• Protein: ~{{Y}} g\n\n"
-        f"👤 {{Name2}}\n"
-        f"• Calories: ~{{X}} kcal\n"
-        f"• Protein: ~{{Y}} g\n\n"
-        f"💬 Brief feedback (1–2 sentences per person)\n\n"
-        f"If a person hasn't sent any messages, mention that.\n\n"
-        f"Here are the entries:\n"
+        f"Format the summary exactly like this:
+
+"
+        f"📊 Calorie Summary – {date_str}
+
+"
+        f"👤 {{Name1}}
+"
+        f"• Calories: ~{{X}} kcal
+"
+        f"• Protein: ~{{Y}} g
+
+"
+        f"👤 {{Name2}}
+"
+        f"• Calories: ~{{X}} kcal
+"
+        f"• Protein: ~{{Y}} g
+
+"
+        f"💬 Brief feedback (1-2 sentences per person)
+
+"
+        f"If a person has not sent any messages, mention that.
+
+"
+        f"Here are the entries:
+"
     )
 
 
