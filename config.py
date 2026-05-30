@@ -4,8 +4,8 @@ import os
 TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
 GROUP_CHAT_ID: int = int(os.environ["GROUP_CHAT_ID"])
 
-# ── Gemini ──────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY: str = os.environ["GEMINI_API_KEY"]
+# ── OpenAI ──────────────────────────────────────────────────────────────────────
+OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
 
 # ── User mapping ────────────────────────────────────────────────────────────────
 USER_NAMES: dict[int, str] = {
