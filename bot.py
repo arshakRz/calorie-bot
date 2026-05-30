@@ -9,6 +9,7 @@ from telegram import Update
 from telegram.ext import (
     Application,
     MessageHandler,
+    CommandHandler,
     filters,
     ContextTypes,
 )
@@ -40,7 +41,8 @@ def init_db():
             user_id     INTEGER NOT NULL,
             username    TEXT NOT NULL,
             text        TEXT,
-            image_b64   TEXT
+            image_b64   TEXT,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
         )
     """)
     conn.commit()
@@ -49,16 +51,43 @@ def init_db():
 
 def save_message(user_id: int, username: str, text: str | None, image_b64: str | None):
     date_str = datetime.now(TZ).strftime("%Y-%m-%d")
+    now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(config.DB_PATH)
     conn.execute(
-        "INSERT INTO messages (date, user_id, username, text, image_b64) VALUES (?,?,?,?,?)",
-        (date_str, user_id, username, text, image_b64),
+        "INSERT INTO messages (date, user_id, username, text, image_b64, created_at) VALUES (?,?,?,?,?,?)",
+        (date_str, user_id, username, text, image_b64, now_utc),
     )
     conn.commit()
     conn.close()
 
 
+def get_messages_since_last_summary() -> list[dict]:
+    """
+    Returns all messages sent since yesterday 23:59 (Berlin time).
+    This is what /calculate uses — covers everything from the last
+    automatic summary up until right now.
+    """
+    now = datetime.now(TZ)
+
+    # "since" = yesterday at 23:59 local time, converted to UTC for DB comparison
+    from datetime import timedelta
+    since_local = now.replace(hour=23, minute=59, second=0, microsecond=0) - timedelta(days=1)
+    since_utc = since_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = sqlite3.connect(config.DB_PATH)
+    rows = conn.execute(
+        "SELECT user_id, username, text, image_b64 FROM messages WHERE created_at >= ?",
+        (since_utc,),
+    ).fetchall()
+    conn.close()
+    return [
+        {"user_id": r[0], "username": r[1], "text": r[2], "image_b64": r[3]}
+        for r in rows
+    ]
+
+
 def get_today_messages() -> list[dict]:
+    """Returns all messages for today (used by the automatic 23:59 job)."""
     date_str = datetime.now(TZ).strftime("%Y-%m-%d")
     conn = sqlite3.connect(config.DB_PATH)
     rows = conn.execute(
@@ -112,32 +141,32 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_message(user.id, user.username or "", caption or None, image_b64)
 
 # ── Gemini summariser ──────────────────────────────────────────────────────────
-def summarise_with_gemini(rows: list[dict]) -> str:
-    date_str = datetime.now(TZ).strftime("%d.%m.%Y")
-
-    prompt = (
-        f"Du bist ein präziser Ernährungsberater. "
-        f"Ich zeige dir alle Nachrichten und Fotos, die zwei Personen heute ({date_str}) über ihre Mahlzeiten geteilt haben. "
-        f"Schätze für jede Person separat die Gesamtkalorien und die Gesamtmenge an Protein (in Gramm). "
-        f"Antworte ausschließlich auf Deutsch. "
-        f"Formatiere die Zusammenfassung genau so:\n\n"
-        f"📊 Tagesauswertung – {date_str}\n\n"
+def build_prompt(date_str: str, since_label: str) -> str:
+    return (
+        f"You are a precise nutrition assistant. "
+        f"Below are all the messages and food photos two people shared about their meals {since_label} ({date_str}). "
+        f"Estimate the total calories and total protein (in grams) for each person separately. "
+        f"Reply exclusively in English. "
+        f"Format the summary exactly like this:\n\n"
+        f"📊 Calorie Summary – {date_str}\n\n"
         f"👤 {{Name1}}\n"
-        f"• Kalorien: ~{{X}} kcal\n"
+        f"• Calories: ~{{X}} kcal\n"
         f"• Protein: ~{{Y}} g\n\n"
         f"👤 {{Name2}}\n"
-        f"• Kalorien: ~{{X}} kcal\n"
+        f"• Calories: ~{{X}} kcal\n"
         f"• Protein: ~{{Y}} g\n\n"
-        f"💬 Kurze Einschätzung (1–2 Sätze pro Person)\n\n"
-        f"Falls eine Person heute keine Nachrichten geschickt hat, weise darauf hin.\n\n"
-        f"Hier sind die heutigen Einträge:\n"
+        f"💬 Brief feedback (1–2 sentences per person)\n\n"
+        f"If a person hasn't sent any messages, mention that.\n\n"
+        f"Here are the entries:\n"
     )
 
-    # Build content parts: text labels + inline images
-    parts = [prompt]
+
+def summarise_with_gemini(rows: list[dict], since_label: str = "today") -> str:
+    date_str = datetime.now(TZ).strftime("%d.%m.%Y")
+    parts = [build_prompt(date_str, since_label)]
 
     if not rows:
-        parts.append("Heute wurden keine Nachrichten geloggt.")
+        parts.append("No messages were logged.")
     else:
         for row in rows:
             name = config.USER_NAMES.get(row["user_id"], row["username"] or f"User {row['user_id']}")
@@ -145,8 +174,7 @@ def summarise_with_gemini(rows: list[dict]) -> str:
                 parts.append(f"[{name}]: {row['text']}")
             if row["image_b64"]:
                 if not row["text"]:
-                    parts.append(f"[{name}] hat ein Foto geschickt:")
-                # Gemini accepts inline images as blobs
+                    parts.append(f"[{name}] sent a photo:")
                 parts.append({
                     "mime_type": "image/jpeg",
                     "data": base64.b64decode(row["image_b64"]),
@@ -155,18 +183,35 @@ def summarise_with_gemini(rows: list[dict]) -> str:
     response = gemini.generate_content(parts)
     return response.text.strip()
 
+# ── /calculate command ─────────────────────────────────────────────────────────
+async def cmd_calculate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != config.GROUP_CHAT_ID:
+        return
+
+    await update.message.reply_text("⏳ Calculating your intake since last night 23:59... hang on!")
+
+    rows = get_messages_since_last_summary()
+    try:
+        summary = summarise_with_gemini(rows, since_label="since yesterday 23:59")
+    except Exception as e:
+        logger.error("Gemini error: %s", e)
+        summary = f"⚠️ Error generating summary: {e}"
+
+    await update.message.reply_text(summary)
+    logger.info("/calculate summary sent.")
+
 # ── Daily job ──────────────────────────────────────────────────────────────────
 async def daily_summary(app: Application):
     logger.info("Running daily calorie summary job…")
     rows = get_today_messages()
     try:
-        summary = summarise_with_gemini(rows)
+        summary = summarise_with_gemini(rows, since_label="today")
     except Exception as e:
         logger.error("Gemini error: %s", e)
-        summary = f"⚠️ Fehler beim Erstellen der Auswertung: {e}"
+        summary = f"⚠️ Error generating summary: {e}"
 
     await app.bot.send_message(chat_id=config.GROUP_CHAT_ID, text=summary)
-    logger.info("Summary sent to group.")
+    logger.info("Daily summary sent to group.")
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
@@ -176,6 +221,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(CommandHandler("calculate", cmd_calculate))
 
     scheduler = AsyncIOScheduler(timezone=TZ)
     scheduler.add_job(
