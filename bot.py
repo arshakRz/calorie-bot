@@ -116,7 +116,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = msg.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
-    image_b64 = base64.b64encode(image_bytes).decode()
+
+    # Convert to JPEG to ensure compatibility with OpenAI vision
+    from PIL import Image
+    import io
+    img = Image.open(io.BytesIO(bytes(image_bytes))).convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    image_b64 = base64.b64encode(buf.getvalue()).decode()
+
     caption = msg.caption or ""
     logger.info("Photo from %s (caption: %s)", display_name(user.id, user.username), caption)
     save_message(user.id, user.username or "", caption or None, image_b64)
@@ -171,6 +179,43 @@ def summarise_with_openai(rows: list[dict], since_label: str = "today") -> str:
     )
     return response.choices[0].message.content.strip()
 
+# ── /flush_db command ─────────────────────────────────────────────────────────
+async def cmd_flush_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != config.GROUP_CHAT_ID:
+        return
+
+    date_str = datetime.now(TZ).strftime("%Y-%m-%d")
+    conn = sqlite3.connect(config.DB_PATH)
+    deleted = conn.execute("DELETE FROM messages WHERE date = ?", (date_str,)).rowcount
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"🗑️ Cleared {deleted} message(s) from today's log.")
+    logger.info("/flush_db cleared %d messages for %s", deleted, date_str)
+
+# ── /logs command ─────────────────────────────────────────────────────────────
+async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != config.GROUP_CHAT_ID:
+        return
+
+    rows = get_today_messages()
+    if not rows:
+        await update.message.reply_text("📭 No messages logged today yet.")
+        return
+
+    lines = ["📋 *Today's logged entries:*\n"]
+    for i, row in enumerate(rows, 1):
+        name = config.USER_NAMES.get(row["user_id"], row["username"] or f"User {row['user_id']}")
+        if row["text"] and row["image_b64"]:
+            lines.append(f"{i}. 👤 {name} — 📸 Photo + 💬 \"{row['text']}\"")
+        elif row["image_b64"]:
+            lines.append(f"{i}. 👤 {name} — 📸 Photo only")
+        elif row["text"]:
+            lines.append(f"{i}. 👤 {name} — 💬 \"{row['text']}\"")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    logger.info("/logs command used.")
+
 # ── /calculate command ─────────────────────────────────────────────────────────
 async def cmd_calculate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != config.GROUP_CHAT_ID:
@@ -204,6 +249,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CommandHandler("calculate", cmd_calculate))
+    app.add_handler(CommandHandler("logs", cmd_logs))
+    app.add_handler(CommandHandler("flush_db", cmd_flush_db))
 
     scheduler = AsyncIOScheduler(timezone=TZ)
     scheduler.add_job(daily_summary, trigger="cron", hour=23, minute=59, args=[app])
