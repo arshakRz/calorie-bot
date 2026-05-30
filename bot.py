@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # ── Gemini client ──────────────────────────────────────────────────────────────
 genai.configure(api_key=config.GEMINI_API_KEY)
-gemini = genai.GenerativeModel("gemini-1.5-flash")
+gemini = genai.GenerativeModel("gemini-2.0-flash")
 
 # ── Timezone ───────────────────────────────────────────────────────────────────
 TZ = ZoneInfo("Europe/Berlin")
