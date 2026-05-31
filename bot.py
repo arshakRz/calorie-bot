@@ -61,11 +61,9 @@ def save_message(user_id: int, username: str, text: str | None, image_b64: str |
 
 
 def get_messages_since_last_summary() -> list[dict]:
-    """Messages since yesterday 23:59 Berlin time — used by /calculate."""
     now = datetime.now(TZ)
     since_local = now.replace(hour=23, minute=59, second=0, microsecond=0) - timedelta(days=1)
     since_utc = since_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
-
     conn = sqlite3.connect(config.DB_PATH)
     rows = conn.execute(
         "SELECT user_id, username, text, image_b64 FROM messages WHERE created_at >= ?",
@@ -76,7 +74,6 @@ def get_messages_since_last_summary() -> list[dict]:
 
 
 def get_today_messages() -> list[dict]:
-    """All messages for today — used by the automatic 23:59 job."""
     date_str = datetime.now(TZ).strftime("%Y-%m-%d")
     conn = sqlite3.connect(config.DB_PATH)
     rows = conn.execute(
@@ -86,9 +83,11 @@ def get_today_messages() -> list[dict]:
     conn.close()
     return [{"user_id": r[0], "username": r[1], "text": r[2], "image_b64": r[3]} for r in rows]
 
+
 # ── Display name helper ────────────────────────────────────────────────────────
 def display_name(user_id: int, username: str) -> str:
     return config.USER_NAMES.get(user_id, username or f"User {user_id}")
+
 
 # ── Message handlers ───────────────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -113,6 +112,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = msg.from_user
     if user.id not in config.USER_NAMES:
         return
+
     photo = msg.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
@@ -129,50 +129,41 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("Photo from %s (caption: %s)", display_name(user.id, user.username), caption)
     save_message(user.id, user.username or "", caption or None, image_b64)
 
+
 # ── OpenAI summariser ──────────────────────────────────────────────────────────
-def build_prompt(date_str: str, since_label: str) -> str:
-    return (
-        f"You are a helpful food journal assistant. "
-        f"Two people are tracking what they eat by sending text messages and photos of their meals. "
-        f"For each photo, first identify what food or drink you can see in it, then use that to estimate the nutritional content. "
-        f"For each person, add up all their meals (from both text and photos) and provide a total calorie and protein estimate. "
-        f"Use realistic average portion sizes when exact amounts are not specified. "
-        f"This is for personal health tracking so always provide your best estimate even if approximate. "
-        f"Reply exclusively in English. "
-        f"Format the summary exactly like this:
-
-"
-        f"📊 Calorie Summary – {date_str}
-
-"
-        f"👤 {{Name1}}
-"
-        f"• Calories: ~{{X}} kcal
-"
-        f"• Protein: ~{{Y}} g
-
-"
-        f"👤 {{Name2}}
-"
-        f"• Calories: ~{{X}} kcal
-"
-        f"• Protein: ~{{Y}} g
-
-"
-        f"💬 Brief feedback (1-2 sentences per person)
-
-"
-        f"If a person has not sent any messages, mention that.
-
-"
-        f"Here are the entries:
-"
-    )
+def build_prompt(date_str: str) -> str:
+    lines = [
+        "You are a helpful food journal assistant.",
+        "Two people are tracking what they eat by sending text messages and photos of their meals.",
+        "For each photo, first identify what food or drink you can see in it, then use that to estimate the nutritional content.",
+        "For each person, add up all their meals from both text and photos and provide a total calorie and protein estimate.",
+        "Use realistic average portion sizes when exact amounts are not specified.",
+        "This is for personal health tracking so always provide your best estimate even if approximate.",
+        "Reply exclusively in English.",
+        "Format the summary exactly like this:",
+        "",
+        f"📊 Calorie Summary - {date_str}",
+        "",
+        "👤 {Name1}",
+        "• Calories: ~{X} kcal",
+        "• Protein: ~{Y} g",
+        "",
+        "👤 {Name2}",
+        "• Calories: ~{X} kcal",
+        "• Protein: ~{Y} g",
+        "",
+        "💬 Brief feedback (1-2 sentences per person)",
+        "",
+        "If a person has not sent any messages, mention that.",
+        "",
+        "Here are the entries:",
+    ]
+    return "\n".join(lines)
 
 
 def summarise_with_openai(rows: list[dict], since_label: str = "today") -> str:
     date_str = datetime.now(TZ).strftime("%d.%m.%Y")
-    content: list = [{"type": "text", "text": build_prompt(date_str, since_label)}]
+    content: list = [{"type": "text", "text": build_prompt(date_str)}]
 
     if not rows:
         content.append({"type": "text", "text": "No messages were logged."})
@@ -199,30 +190,28 @@ def summarise_with_openai(rows: list[dict], since_label: str = "today") -> str:
     )
     return response.choices[0].message.content.strip()
 
-# ── /flush_db command ─────────────────────────────────────────────────────────
+
+# ── /flush_db command ──────────────────────────────────────────────────────────
 async def cmd_flush_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != config.GROUP_CHAT_ID:
         return
-
     date_str = datetime.now(TZ).strftime("%Y-%m-%d")
     conn = sqlite3.connect(config.DB_PATH)
     deleted = conn.execute("DELETE FROM messages WHERE date = ?", (date_str,)).rowcount
     conn.commit()
     conn.close()
-
     await update.message.reply_text(f"🗑️ Cleared {deleted} message(s) from today's log.")
     logger.info("/flush_db cleared %d messages for %s", deleted, date_str)
 
-# ── /logs command ─────────────────────────────────────────────────────────────
+
+# ── /logs command ──────────────────────────────────────────────────────────────
 async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != config.GROUP_CHAT_ID:
         return
-
     rows = get_today_messages()
     if not rows:
         await update.message.reply_text("📭 No messages logged today yet.")
         return
-
     lines = ["📋 *Today's logged entries:*\n"]
     for i, row in enumerate(rows, 1):
         name = config.USER_NAMES.get(row["user_id"], row["username"] or f"User {row['user_id']}")
@@ -232,9 +221,9 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"{i}. 👤 {name} — 📸 Photo only")
         elif row["text"]:
             lines.append(f"{i}. 👤 {name} — 💬 \"{row['text']}\"")
-
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     logger.info("/logs command used.")
+
 
 # ── /calculate command ─────────────────────────────────────────────────────────
 async def cmd_calculate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -250,9 +239,10 @@ async def cmd_calculate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(summary)
     logger.info("/calculate summary sent.")
 
+
 # ── Daily job ──────────────────────────────────────────────────────────────────
 async def daily_summary(app: Application):
-    logger.info("Running daily calorie summary job…")
+    logger.info("Running daily calorie summary job...")
     rows = get_today_messages()
     try:
         summary = summarise_with_openai(rows, since_label="today")
@@ -261,6 +251,7 @@ async def daily_summary(app: Application):
         summary = f"⚠️ Error generating summary: {e}"
     await app.bot.send_message(chat_id=config.GROUP_CHAT_ID, text=summary)
     logger.info("Daily summary sent to group.")
+
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
@@ -275,7 +266,7 @@ def main():
     scheduler = AsyncIOScheduler(timezone=TZ)
     scheduler.add_job(daily_summary, trigger="cron", hour=23, minute=59, args=[app])
     scheduler.start()
-    logger.info("Scheduler started – daily summary at 23:59 Europe/Berlin")
+    logger.info("Scheduler started - daily summary at 23:59 Europe/Berlin")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
